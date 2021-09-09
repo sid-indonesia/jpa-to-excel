@@ -1,5 +1,7 @@
 package org.sidindonesia.jpatoexcel.helper;
 
+import static java.util.Arrays.asList;
+
 import java.beans.PropertyDescriptor;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -8,6 +10,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -21,6 +24,7 @@ import org.apache.poi.ss.usermodel.IndexedColors;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.xssf.streaming.SXSSFSheet;
 import org.apache.poi.xssf.streaming.SXSSFWorkbook;
 import org.apache.poi.xssf.usermodel.XSSFCellStyle;
 import org.sidindonesia.jpatoexcel.exception.ExcelWriteException;
@@ -60,7 +64,7 @@ public final class ExcelHelper {
 
 			Field[] fields = entityClass.getDeclaredFields();
 			Map<String, Method> getterMethods = getGetterMethodsByFieldName(fields, entityClass);
-			createHeaderRow(sheet, fields);
+			createHeaderRow(sheet, fields, 0);
 
 			List<?> result = retrieveAllRowsFromDatabase(context, entityClass, jpaRepositoryPackageName, "findAll");
 
@@ -80,11 +84,10 @@ public final class ExcelHelper {
 		return getterMethodsByFieldName;
 	}
 
-	private static void createHeaderRow(Sheet sheet, Field[] fields) {
-		Row headerRow = sheet.createRow(0);
-		int headerCol = 0;
+	private static void createHeaderRow(Sheet sheet, Field[] fields, int startingColumn) {
+		Row headerRow = sheet.getRow(0) == null ? sheet.createRow(0) : sheet.getRow(0);
 		for (Field field : fields) {
-			Cell cell = headerRow.createCell(headerCol++);
+			Cell cell = headerRow.createCell(startingColumn++);
 			cell.setCellValue(CamelCaseUtil.camelToSnake(field.getName()));
 		}
 		sheet.createFreezePane(0, 1);
@@ -108,7 +111,7 @@ public final class ExcelHelper {
 		} catch (IllegalAccessException | IllegalArgumentException | InvocationTargetException | NoSuchMethodException
 			| SecurityException e) {
 			throw new ExcelWriteException(
-				"Failed to invoke method `" + methodName + "` of class: " + repositoryClass + "\nException: ");
+				"Failed to invoke method `" + methodName + "` of class: " + repositoryClass + "\nException: " + e);
 		}
 	}
 
@@ -139,8 +142,8 @@ public final class ExcelHelper {
 
 				Field[] fields = entityClass.getDeclaredFields();
 				Map<String, Method> getterMethods = getGetterMethodsByFieldName(fields, entityClass);
-				createHeaderRow(sheet, fields);
-				createLastHeaderRowsForValidationReportColumns(sheet, fields.length);
+				createFirstHeaderRowsForValidationReportColumns(sheet, 0);
+				createHeaderRow(sheet, fields, 3);
 
 				List<?> result = retrieveAllRowsFromDatabase(context, entityClass, jpaRepositoryPackageName,
 					"findAllByDateCreatedBetween", fromDate, untilDate);
@@ -165,28 +168,34 @@ public final class ExcelHelper {
 		return missingValueCellStyle;
 	}
 
-	private static void createLastHeaderRowsForValidationReportColumns(Sheet sheet, int lastHeaderCol) {
-		Row headerRow = sheet.getRow(0);
-		Cell totalMissingValuesHeaderCell = headerRow.createCell(lastHeaderCol++);
+	private static void createFirstHeaderRowsForValidationReportColumns(Sheet sheet, int firstHeaderCol) {
+		Row headerRow = sheet.getRow(0) == null ? sheet.createRow(0) : sheet.getRow(0);
+
+		((SXSSFSheet) sheet).trackColumnsForAutoSizing(asList(firstHeaderCol, firstHeaderCol + 1, firstHeaderCol + 2));
+
+		Cell totalMissingValuesHeaderCell = headerRow.createCell(firstHeaderCol);
 		totalMissingValuesHeaderCell.setCellValue("Total Missing Values");
-		Cell filledValuesPercentage = headerRow.createCell(lastHeaderCol++);
-		filledValuesPercentage.setCellValue("Percentage of non-missing values"); // fields.length - total missng values
-																					// / fields.length * 100
-		Cell validationReportCell = headerRow.createCell(lastHeaderCol);
-		validationReportCell.setCellValue("Validation Report"); // which column value is missing
+		Cell filledValuesPercentageCell = headerRow.createCell(firstHeaderCol + 1);
+		filledValuesPercentageCell.setCellValue("Percentage of Non-missing Values");
+		Cell validationReportCell = headerRow.createCell(firstHeaderCol + 2);
+		validationReportCell.setCellValue("Column Name(s) With Missing Value"); // which column(s) value is/are missing
 	}
 
 	private static void fillAndValidateContentRows(Sheet sheet, Field[] fields, AtomicInteger rowIdx, Object entry,
 		Map<String, Method> getterMethods, CellStyle missingValueCellStyle) {
 		Row contentRow = sheet.createRow(rowIdx.incrementAndGet());
-		int contentCol = 0;
+		int contentCol = 3; // first 3 columns are validationReport cells
+		int numOfColumnsWithMissingValue = 0;
+		List<String> missingValueColumnsName = new ArrayList<>();
 		for (Field field : fields) {
 			Cell cell = contentRow.createCell(contentCol++);
 			try {
 				Object invokeGetterResult = getterMethods.get(field.getName()).invoke(entry);
 
-				if (invokeGetterResult == null) {
+				if (invokeGetterResult == null || invokeGetterResult.toString().isBlank()) {
 					cell.setCellStyle(missingValueCellStyle);
+					numOfColumnsWithMissingValue++;
+					missingValueColumnsName.add(CamelCaseUtil.camelToSnake(field.getName()));
 				} else {
 					cell.setCellValue(invokeGetterResult.toString());
 				}
@@ -195,5 +204,17 @@ public final class ExcelHelper {
 				throw new ExcelWriteException(FAILED_TO_IMPORT_DATA_TO_EXCEL_FILE + e.getCause());
 			}
 		}
+
+		int validationReportCol = 0;
+		Cell totalMissingValuesCell = contentRow.createCell(validationReportCol);
+		totalMissingValuesCell.setCellValue(numOfColumnsWithMissingValue);
+		Cell filledValuesPercentage = contentRow.createCell(validationReportCol + 1);
+		filledValuesPercentage.setCellValue((fields.length - numOfColumnsWithMissingValue) * 100d / fields.length);
+		Cell validationReportCell = contentRow.createCell(validationReportCol + 2);
+		validationReportCell.setCellValue(String.join(", ", missingValueColumnsName));
+
+		sheet.autoSizeColumn(totalMissingValuesCell.getColumnIndex());
+		sheet.autoSizeColumn(filledValuesPercentage.getColumnIndex());
+		sheet.autoSizeColumn(validationReportCell.getColumnIndex());
 	}
 }
