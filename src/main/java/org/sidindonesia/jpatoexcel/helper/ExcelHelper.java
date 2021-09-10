@@ -130,7 +130,7 @@ public final class ExcelHelper {
 		}
 	}
 
-	public static ByteArrayInputStream validateAllColumnsAreNotEmpty(ApplicationContext context,
+	public static ByteArrayInputStream validateAllTableColumnsAreNotEmpty(ApplicationContext context,
 		String jpaEntityPackageName, String jpaRepositoryPackageName, LocalDateTime fromDate, LocalDateTime untilDate) {
 
 		try (Workbook workbook = new SXSSFWorkbook(); ByteArrayOutputStream out = new ByteArrayOutputStream();) {
@@ -216,5 +216,37 @@ public final class ExcelHelper {
 		sheet.autoSizeColumn(totalMissingValuesCell.getColumnIndex());
 		sheet.autoSizeColumn(filledValuesPercentage.getColumnIndex());
 		sheet.autoSizeColumn(validationReportCell.getColumnIndex());
+	}
+
+	// TODO specific tables and columns
+	public static ByteArrayInputStream validateColumnsAreNotEmpty(ApplicationContext context,
+		String jpaEntityPackageName, String jpaRepositoryPackageName, LocalDateTime fromDate, LocalDateTime untilDate) {
+
+		try (Workbook workbook = new SXSSFWorkbook(); ByteArrayOutputStream out = new ByteArrayOutputStream();) {
+
+			Set<Class<?>> entityClasses = ReflectionsUtil.getAllEntityClasses(jpaEntityPackageName);
+
+			entityClasses.forEach(entityClass -> {
+				Sheet sheet = workbook.createSheet(CamelCaseUtil.camelToSnake(entityClass.getSimpleName()));
+
+				Field[] fields = entityClass.getDeclaredFields();
+				Map<String, Method> getterMethods = getGetterMethodsByFieldName(fields, entityClass);
+				createFirstHeaderRowsForValidationReportColumns(sheet, 0);
+				createHeaderRow(sheet, fields, 3);
+
+				List<?> result = retrieveAllRowsFromDatabase(context, entityClass, jpaRepositoryPackageName,
+					"findAllByDateCreatedBetween", fromDate, untilDate);
+
+				AtomicInteger rowIdx = new AtomicInteger();
+				CellStyle missingValueCellStyle = createMissingValueCellStyle(workbook);
+				result.stream().forEach(entry -> fillAndValidateContentRows(sheet, fields, rowIdx, entry, getterMethods,
+					missingValueCellStyle));
+			});
+
+			workbook.write(out);
+			return new ByteArrayInputStream(out.toByteArray());
+		} catch (IOException e) {
+			throw new ExcelWriteException(FAILED_TO_IMPORT_DATA_TO_EXCEL_FILE + e.getMessage());
+		}
 	}
 }
